@@ -1,0 +1,196 @@
+import matplotlib.pyplot as plt # for showing image
+import numpy as np
+from scipy.special import j0,j1
+import sys
+import os,glob
+
+class object_info:
+    '''
+    Parameters
+    ----------
+    obj_type: type of object
+    radius: radius of ball or cylinder
+    height: height of cylinder
+    width: width of box
+    length: lenght of box
+    rot_x: rotation about x-axis in real space
+    rot_y: rotation about y-axis in real space
+    rot_z: rotation about z-axis in real space
+    shift_a: shift fraction coordinate of a vector 
+    shift_b: shift fraction coordinate of b vector 
+    shift_c: shift fraction coordinate of c vector 
+    '''
+    def __init__(self,*args):
+        self.args = list(args)[0]
+        self.obj_type = self.args[0] 
+        if self.obj_type == 'ball':
+            (self.radius,
+            self.rot_x,self.rot_y,self.rot_z,
+            self.shift_x,self.shift_y,self.shift_z) = self.args[1:]
+        if self.obj_type == 'cylinder':
+            (self.radius,self.height,
+            self.rot_x,self.rot_y,self.rot_z,
+            self.shift_x,self.shift_y,self.shift_z) = self.args[1:]
+        if self.obj_type == 'box':
+            (self.width,self.length,self.heigth,
+            self.rot_x,self.rot_y,self.rot_z,
+            self.shift_a,self.shift_b,self.shift_c) = self.args[1:]
+    
+    def cylinder(self,qvec,
+                density=1):
+        '''
+        calculate the fourier transform of cylinder object
+        radius and height are of cylinder
+        density represent the uniform density within cylinder
+        thus electron density = density * volume
+        '''
+        qr = np.hypot(qvec[0],qvec[1])
+        V  = 2*np.pi*self.radius**2*self.height
+        
+        
+        F  = 2*j0(qvec[2]*self.height/2)*j1(qr*self.radius)/qr/self.radius + 1j*0
+        F *= density*V
+        return F
+        
+    def box(self,qvec,density=1):
+        '''
+        Fourier transform of a box with edge length a, b, c.
+        '''
+        a,b,c = (self.length,self.width,self.height)
+        V = a*b*c
+        F = np.sinc(qvec[0]*a)*np.sinc(qvec[1]*b)*np.sinc(qvec[2]*c)
+        return F*density*V
+    
+    def ball(self,qvec,density=1):
+        r = self.radius
+        q = np.linalg.norm(qvec)
+        V = 4./3*np.pi*r**3
+        return ((3*V*(np.sin(q*r)-q*r*np.cos(q*r))/((q*r)**3))**2)/V    
+      
+def calc_vectors(a, b, c, alpha, beta, gamma):
+    '''
+    Parameters
+    -----------
+    a: a of lattice
+    b: b of lattice
+    c: c of lattice
+    alpha: alpha of lattice
+    beta:  beta of lattice
+    gamma: gamma of lattice
+    '''  
+    # unit vector
+    # a is always along the x-axis
+    # b is in the x-y plane 
+    
+    b1 = b*np.cos(np.radians(gamma))
+    b2 = b*np.sin(np.radians(gamma))
+    c1 = c*np.cos(np.radians(beta))
+    c2 = (c*(np.cos(np.radians(alpha))-
+            np.cos(np.radians(beta))*np.cos(np.radians(gamma)))/
+            np.sin(np.radians(gamma)))
+    c3 = np.sqrt(c**2-c1**2-c2**2)
+    uv = {'a': np.asarray([a, 0, 0]),
+        'b': np.asarray([b1, b2, 0]),
+        'c': np.asarray([c1, c2, c3])}
+    
+    s = 2*np.pi/(a*b2*c3)
+    
+    # reciprocal vector
+    rv = {'A': s*np.cross(uv['b'],uv['c']), 
+        'B': s*np.cross(uv['a'],uv['c']), 
+        'C': s*np.cross(uv['a'],uv['b'])}
+    
+    return uv,rv 
+
+def real_vec(uv,fract_x,fract_y,fract_z):
+    return uv['a']*fract_x+uv['b']*fract_y+uv['c']*fract_z    
+
+
+def structure_factor(q,fm_f,h,k,l,uv,rv,frac):
+        
+    qhkl = h*rv['A']+k*rv['B']+l*rv['C']
+    Atom_Scatter = fm_f[np.argmin(np.abs(q-np.linalg.norm(qhkl)))]
+    
+    Fhkl = 0+1j*0
+    for _ in range(len(frac)):
+        rhkl = real_vec(uv,frac[_][0],frac[_][1],frac[_][2])
+        Fhkl += Atom_Scatter*np.exp(1j*np.dot(qhkl,rhkl))
+    
+    return qhkl,Fhkl
+
+def peak_shape(q,mu,sigma):
+    return (2/np.pi/sigma)*np.exp(-4*(q-mu)**2/np.pi**2/sigma**2)
+        
+def hkl_layer_line(qr,fm_f,h,k,l,uv,rv,frac,sigma):
+    I = qr*0#+1j*0
+    h = np.arange(-h,h+1)
+    k = np.arange(-k,k+1)
+    l = np.arange(-l,l+1)
+    for _ in h:
+        for __ in k:
+            for ___ in l:
+                qhkl,Fhkl = structure_factor(qr,fm_f,_,__,___,uv,rv,frac)
+                if np.linalg.norm(qhkl)>qr[-1]:
+                    pass
+                elif np.isnan(Fhkl):
+                    pass
+                else:
+                    I += np.abs(Fhkl)**2/qr**2*peak_shape(qr,np.linalg.norm(qhkl),sigma)
+    return I
+
+def S_bkg(q,A0,A1,A2,A3,A4,A5,A6):
+    q = (q-q[0])/(q[-1]-q[0])*2-1
+    T0 = 1
+    T1 = q
+    T2 = 2*q**2-1
+    T3 = 4*q**3-3*q
+    T4 = 8*q**4-8*q**2+1
+    T5 = 16*q**5-20*q**3+5*q
+    T6 = 32*q**6-48*q**4-18*q**2-1
+    return (A0*T0+A1*T1+A2*T2+A3*T3+A4*T4+A5*T5+A6*T6)
+    
+def S_fit(q,fm_f,fm_b,h,k,l,a,b,c,alpha,beta,gamma,frac,sigma,scale,bkgd):
+        #A0,A1,A2,A3,A4,A5,A6):
+    uv,rv = calc_vectors(a, b, c, alpha, beta, gamma)
+    I = hkl_layer_line(q,fm_f,h,k,l,uv,rv,frac,sigma)
+    I[np.isnan(I)] = 0.
+    #I /= fm_b#np.nanmax(I)
+    I /= np.nanmax(I)
+    #bkgd = S_bkg(q,A0,A1,A2,A3,A4,A5,A6)
+    return I*scale+bkgd
+    
+class Coord:
+    def __init__(self):
+        pass
+        
+    def rotate_matrix(alpha,beta,gamma):
+        '''
+        rotate matrix for vector in euclid space
+        defined by three anlges rotating about different axis in degrees
+        alpha rotate about x-aixs counter-clock wise in y-z plane
+        beta rotate about y-axis counter-clock wise in x-z plane
+        gamma rotate about z-axis counter-clock wise in x-y plane
+        '''
+        alpha = np.radians(alpha)
+        beta  = np.radians(beta)
+        gamma = np.radians(gamma)
+        
+        Rx = np.array([(1, 0, 0,),
+                    (0, np.cos(alpha), -np.sin(alpha)),
+                    (0, np.sin(alpha),  np.cos(alpha))])
+        Ry = np.array([( np.cos(beta), 0, np.sin(beta)),
+                    (0, 1, 0),
+                    (-np.sin(beta), 0, np.cos(beta))])
+        Rz = np.array([(np.cos(gamma), -np.sin(gamma), 0),
+                    (np.sin(gamma),  np.cos(gamma), 0),
+                    (0, 0 ,1)])
+        return np.matmul(np.matmul(Rx,Ry),Rz)
+    
+    def shift_phase(qvec,rvec):
+        '''
+        the displacement of particle in real space will lead to phase difference in fourier space
+        rvec is displacement of real space vector
+        qvec is displacement of fourier space vector
+        '''
+        return np.exp(1j*np.dot(qvec,rvec))
+        
